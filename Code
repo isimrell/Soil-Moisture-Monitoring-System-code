@@ -1,0 +1,95 @@
+"""
+ELN 233: Embedded Project - Smart Plant Growth Monitor
+Author: Ian
+Date: Spring 2026
+
+Description:
+This script interfaces a Raspberry Pi 5 with an MCP3008 ADC via the SPI bus.
+It monitors Soil Moisture, Light Levels, and Temperature, converting raw 
+10-bit data into engineering units and executing a simultaneous alert logic.
+"""
+
+import spidev  # Library for SPI communication
+import time    # Library for loop timing and delays
+
+# --- Hardware Configuration & Constants ---
+V_REF = 3.3       # Reference voltage used for ADC conversion
+SPI_BUS = 0       # Raspberry Pi SPI bus 0
+SPI_DEVICE = 0    # Chip Select 0 (CE0 / Pin 24)
+CALIBRATION_OFFSET = 42.7  # Offset to normalize TMP36 readings to room temp
+
+# --- Initialize SPI Bus ---
+spi = spidev.SpiDev()
+spi.open(SPI_BUS, SPI_DEVICE)
+spi.max_speed_hz = 1000000  # Set SPI speed to 1MHz for signal stability
+
+def read_adc(channel):
+    """
+    Reads raw 10-bit data (0-1023) from the specified MCP3008 channel.
+    Protocol: Sends Start Bit, Single-Ended Bit, and Channel Selection.
+    """
+    if channel < 0 or channel > 7:
+        return -1
+    
+    # SPI Transaction: [Start Bit, Channel Config, Dummy Byte]
+    # The MCP3008 returns 3 bytes; we extract the last 10 bits.
+    r = spi.xfer2([1, (8 + channel) << 4, 0])
+    adc_out = ((r[1] & 3) << 8) + r[2]
+    return adc_out
+
+def convert_to_voltage(adc_value):
+    """
+    Formula: Vout = (ADC Reading / 1023) * Vref
+    Converts the raw digital value back into the original analog voltage.
+    """
+    return (adc_value / 1023.0) * V_REF
+
+try:
+    print("--- Smart Plant Monitor Active ---")
+    while True:
+        # 1. DATA ACQUISITION: Read all three sensors
+        raw_moisture = read_adc(0)  # Channel 0: Soil Moisture (Blue Wire)
+        raw_light = read_adc(1)     # Channel 1: Photoresistor (White/Gray Wire)
+        raw_temp = read_adc(2)      # Channel 2: TMP36 (Brown Wire)
+
+        # 2. DATA PROCESSING: Convert raw bits to Engineering Units
+        
+        # Temperature: 10mV/C with 500mV offset.
+        v_temp = convert_to_voltage(raw_temp)
+        deg_c = ((v_temp - 0.5) * 100) - CALIBRATION_OFFSET
+        
+        # Moisture: 0% (Dry/1023) to 100% (Wet/0)
+        moisture_pct = 100 - (raw_moisture / 1023.0 * 100)
+        
+        # Light: 0% (Dark) to 100% (Bright)
+        light_pct = (raw_light / 1023.0 * 100)
+
+        # 3. LOGIC-BASED RESPONSE: Execute simultaneous alerts
+        active_alerts = []
+        
+        if moisture_pct < 30:
+            active_alerts.append("LOW WATER")
+        
+        if light_pct < 20:
+            active_alerts.append("LOW LIGHT")
+            
+        if deg_c > 35:
+            active_alerts.append("OVERHEATING")
+
+        # 4. OUTPUT: Format the final display for the user
+        status_line = f"Soil: {moisture_pct:.1f}% | Light: {light_pct:.1f}% | Temp: {deg_c:.1f}C"
+        
+        if active_alerts:
+            # Displays multiple alerts simultaneously if conditions apply
+            alert_string = " | ".join(active_alerts)
+            print(f"{status_line} >>> [ALERTS: {alert_string}]")
+        else:
+            # Displays healthy status if all sensors are within thresholds
+            print(f"{status_line} >>> [STATUS: HEALTHY]")
+
+        time.sleep(2)  # Sampling interval to prevent CPU overhead
+
+except KeyboardInterrupt:
+    # Safe shutdown: Close SPI bus on Exit
+    spi.close()
+    print("\nSystem monitoring halted by user.")
